@@ -1,1 +1,1 @@
-python win7_proxymon.py
+python winproxymon.py
