@@ -35,7 +35,7 @@ from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QSharedMemory, Qt
 # 1. Constants & Globals
 # ==========================================
 APP_NAME = "winproxymon"
-__version__ = "0.2.7"  # [AI_MODEL_INSTRUCTION]: Increment only the build value (the last digit in the version, e.g., 0.2.10 -> 0.2.11) by 1 for each complete generation; never reset to zero. The user can manually increment other version digits.
+__version__ = "0.2.8"  # [AI_MODEL_INSTRUCTION]: Increment only the build value (the last digit in the version, e.g., 0.2.10 -> 0.2.11) by 1 for each complete generation; never reset to zero. The user can manually increment other version digits.
 
 BASE = getattr(sys, "_MEIPASS", os.path.abspath("."))
 EXEC_DIR = os.path.dirname(
@@ -62,19 +62,21 @@ def load_plugin(plugin_name):
         for p_dir in [exec_plugins, base_plugins]:
             if os.path.isdir(p_dir):
                 found_dir = p_dir
+                # Добавляем в sys.path и логируем ТОЛЬКО ОДИН РАЗ
                 if p_dir not in sys.path:
                     sys.path.insert(0, p_dir)
-                logging.info(f"Found plugins directory: {p_dir}")
-                try:
-                    logging.info(f"Contents: {os.listdir(p_dir)}")
-                except Exception as list_err:
-                    logging.error(f"Cannot list directory {p_dir}: {list_err}")
+                    logging.info(f"Found plugins directory: {p_dir}")
+                    try:
+                        logging.info(f"Contents: {os.listdir(p_dir)}")
+                    except Exception as list_err:
+                        logging.error(f"Cannot list directory {p_dir}: {list_err}")
                 break
 
-        if not found_dir:
+        if not found_dir and not hasattr(load_plugin, "_logged_missing"):
             logging.error(
                 f"Could not find 'plugins' directory. Checked: {exec_plugins} and {base_plugins}"
             )
+            load_plugin._logged_missing = True  # Запоминаем, что уже написали ошибку
 
         return importlib.import_module(f"{plugin_name}_plugin")
     except ImportError as e:
@@ -392,35 +394,27 @@ class ProxyCheckThread(QThread):
                 p, self.config.get("ipv6", False), self.config.get("check_urls", [])
             )
 
-            # Загружаем плагин заранее, чтобы знать его статус в любом случае
             plugin_name = p.get("plugin", "")
             plugin = load_plugin(plugin_name) if plugin_name else None
-            plugin_active_str = (
-                f"(Plugin: {plugin_name})"
-                if plugin
-                else f"(Plugin: '{plugin_name}' NOT LOADED)" if plugin_name else ""
-            )
 
             if proxy_ok:
                 icon = "icon_green.png"
                 status = "ONLINE"
-                detail = f"{detail} {plugin_active_str}".strip()
+                # detail остается как есть, без упоминания плагина
             else:
                 if not local_net_ok:
                     icon = "icon_red.png"
                     status = "NO LOCAL NET"
-                    detail = f"{detail} {plugin_active_str}".strip()
                 else:
                     port_ok = is_port_open(p["host"], p["port"])
                     if not port_ok:
                         icon = "icon_red.png"
                         status = "OFFLINE"
-                        detail = f"{detail} {plugin_active_str}".strip()
                     else:
                         icon = "icon_yellow.png"
                         status = "NO EXIT"
 
-                        # --- ВЫЗОВ ПЛАГИНА ПРИ ПРОБЛЕМЕ (NO EXIT) ---
+                        # --- ВЫЗОВ ПЛАГИНА ТОЛЬКО ПРИ ПРОБЛЕМЕ (NO EXIT) ---
                         if plugin and hasattr(plugin, "diagnose_and_repair"):
                             try:
                                 plugin_detail = plugin.diagnose_and_repair(self.config)
