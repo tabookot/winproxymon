@@ -5,6 +5,7 @@ import logging
 import configparser
 import ctypes
 import winreg
+import importlib  # <-- Добавлен импорт
 from ctypes import wintypes
 
 import requests
@@ -33,7 +34,8 @@ from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QSharedMemory, Qt
 # ==========================================
 # 1. Constants & Globals
 # ==========================================
-APP_NAME = "win7_proxymon"
+APP_NAME = "winproxymon"
+__version__ = "0.2.7"  # [AI_MODEL_INSTRUCTION]: Increment only the build value (the last digit in the version, e.g., 0.2.10 -> 0.2.11) by 1 for each complete generation; never reset to zero. The user can manually increment other version digits.
 
 BASE = getattr(sys, "_MEIPASS", os.path.abspath("."))
 EXEC_DIR = os.path.dirname(
@@ -46,6 +48,42 @@ IMG_DIR = os.path.join(BASE, "img")
 logging.basicConfig(
     filename=LOG_PATH, level=logging.INFO, format="[%(asctime)s] %(message)s"
 )
+
+
+# Функция загрузки плагинов из подпапки plugins/
+def load_plugin(plugin_name):
+    if not plugin_name:
+        return None
+    try:
+        base_plugins = os.path.join(BASE, "plugins")
+        exec_plugins = os.path.join(EXEC_DIR, "plugins")
+
+        found_dir = None
+        for p_dir in [exec_plugins, base_plugins]:
+            if os.path.isdir(p_dir):
+                found_dir = p_dir
+                if p_dir not in sys.path:
+                    sys.path.insert(0, p_dir)
+                logging.info(f"Found plugins directory: {p_dir}")
+                try:
+                    logging.info(f"Contents: {os.listdir(p_dir)}")
+                except Exception as list_err:
+                    logging.error(f"Cannot list directory {p_dir}: {list_err}")
+                break
+
+        if not found_dir:
+            logging.error(
+                f"Could not find 'plugins' directory. Checked: {exec_plugins} and {base_plugins}"
+            )
+
+        return importlib.import_module(f"{plugin_name}_plugin")
+    except ImportError as e:
+        logging.error(f"Plugin '{plugin_name}' import failed. {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Error loading plugin '{plugin_name}': {e}")
+        return None
+
 
 # ==========================================
 # 2. Windows API for fullscreen detection
@@ -122,20 +160,22 @@ def load_config():
                     "protocol": p.get("protocol", "socks5"),
                     "username": p.get("username", ""),
                     "password": p.get("password", ""),
+                    "plugin": p.get("plugin", ""),  # <--- Обязательно чтение плагина
                 }
             )
 
     if not proxies:
         proxies.append(
             {
-                "id": "proxy_1",
-                "name": "Default",
-                "enabled": True,
-                "host": "127.0.0.1",
-                "port": "1080",
-                "protocol": "socks5",
-                "username": "",
-                "password": "",
+                "id": section,
+                "name": p.get("name", section),
+                "enabled": p.getboolean("enabled", fallback=True),
+                "host": p.get("host", "127.0.0.1"),
+                "port": p.get("port", "1080"),
+                "protocol": p.get("protocol", "socks5"),
+                "username": p.get("username", ""),
+                "password": p.get("password", ""),
+                "plugin": p.get("plugin", ""),  # <--- Добавлено чтение плагина
             }
         )
 
@@ -146,6 +186,20 @@ def load_config():
         "h": s.getint("dialog_h", fallback=400),
     }
 
+    # Читаем список сайтов для проверки IP
+    raw_urls = s.get(
+        "check_urls",
+        "https://api.ipify.org, https://checkip.amazonaws.com, https://ident.me",
+    )
+    check_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
+
+    # Читаем настройки для Tor плагина
+    tor_settings = {
+        "torrc_path": s.get("torrc_path", ""),
+        "log_path": s.get("log_path", ""),
+        "service_name": s.get("service_name", "tor"),
+    }
+
     return {
         "proxies": proxies,
         "interval_ms": int(s.get("interval_minutes", 1)) * 60000,
@@ -154,6 +208,8 @@ def load_config():
             "disable_notifications_in_fullscreen", fallback=True
         ),
         "ui_geometry": ui_geo,
+        "tor_settings": tor_settings,
+        "check_urls": check_urls,  # <--- Добавлено
     }
 
 
@@ -177,6 +233,7 @@ def save_config_settings(config_dict):
         "dialog_y": str(geo.get("y", 100)),
         "dialog_w": str(geo.get("w", 750)),
         "dialog_h": str(geo.get("h", 400)),
+        "check_urls": ", ".join(config_dict.get("check_urls", [])),  # <--- Добавлено
     }
 
     for p in config_dict.get("proxies", []):
@@ -188,6 +245,7 @@ def save_config_settings(config_dict):
             "protocol": p.get("protocol", "socks5"),
             "username": p.get("username", ""),
             "password": p.get("password", ""),
+            "plugin": p.get("plugin", ""),  # <--- Обязательно сохранение плагина
         }
 
     with open(INI_PATH, "w") as f:
@@ -253,7 +311,7 @@ def is_port_open(host, port):
         return False
 
 
-def check_proxy(proxy_cfg, use_ipv6):
+def check_proxy(proxy_cfg, use_ipv6, check_urls):
     try:
         session = requests.Session()
         session.trust_env = False
@@ -279,12 +337,18 @@ def check_proxy(proxy_cfg, use_ipv6):
 
             socket.getaddrinfo = v4_only_getaddrinfo
 
+        last_err = "Unknown error"
         try:
-            r = session.get("https://ifconfig.me", timeout=7)
-            if r.ok:
-                return True, "OK"
-            else:
-                return False, f"HTTP Error {r.status_code}"
+            for url in check_urls:
+                try:
+                    r = session.get(url, timeout=7)
+                    if r.ok:
+                        return True, f"OK (IP: {r.text.strip()})"
+                    else:
+                        last_err = f"HTTP {r.status_code}"
+                except requests.exceptions.RequestException as e:
+                    last_err = str(e)
+            return False, last_err
         finally:
             socket.getaddrinfo = original_getaddrinfo
 
@@ -324,23 +388,49 @@ class ProxyCheckThread(QThread):
         local_net_ok = check_local_internet()
 
         for p in enabled_proxies:
-            proxy_ok, detail = check_proxy(p, self.config.get("ipv6", False))
+            proxy_ok, detail = check_proxy(
+                p, self.config.get("ipv6", False), self.config.get("check_urls", [])
+            )
+
+            # Загружаем плагин заранее, чтобы знать его статус в любом случае
+            plugin_name = p.get("plugin", "")
+            plugin = load_plugin(plugin_name) if plugin_name else None
+            plugin_active_str = (
+                f"(Plugin: {plugin_name})"
+                if plugin
+                else f"(Plugin: '{plugin_name}' NOT LOADED)" if plugin_name else ""
+            )
 
             if proxy_ok:
                 icon = "icon_green.png"
                 status = "ONLINE"
+                detail = f"{detail} {plugin_active_str}".strip()
             else:
                 if not local_net_ok:
                     icon = "icon_red.png"
                     status = "NO LOCAL NET"
+                    detail = f"{detail} {plugin_active_str}".strip()
                 else:
                     port_ok = is_port_open(p["host"], p["port"])
                     if not port_ok:
                         icon = "icon_red.png"
                         status = "OFFLINE"
+                        detail = f"{detail} {plugin_active_str}".strip()
                     else:
                         icon = "icon_yellow.png"
                         status = "NO EXIT"
+
+                        # --- ВЫЗОВ ПЛАГИНА ПРИ ПРОБЛЕМЕ (NO EXIT) ---
+                        if plugin and hasattr(plugin, "diagnose_and_repair"):
+                            try:
+                                plugin_detail = plugin.diagnose_and_repair(self.config)
+                                detail = f"{detail} (Plugin says: {plugin_detail})"
+                            except Exception as e:
+                                detail = f"{detail} (Plugin error: {e})"
+                        elif plugin_name:
+                            detail = f"{detail} (Plugin '{plugin_name}' not loaded!)"
+                        else:
+                            detail = f"{detail} (No plugin assigned)"
 
             results.append(
                 {"name": p["name"], "status": status, "detail": detail, "icon": icon}
@@ -356,7 +446,7 @@ class ProxyCheckThread(QThread):
 class ProxyManagerDialog(QDialog):
     def __init__(self, current_proxies, geometry=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Manage Proxies")
+        self.setWindowTitle(f"Manage Proxies - v{__version__}")
         self.proxies = [p.copy() for p in current_proxies]
         self.current_index = -1
 
@@ -400,6 +490,10 @@ class ProxyManagerDialog(QDialog):
         self.txt_password = QLineEdit()
         self.txt_password.setEchoMode(QLineEdit.Password)
 
+        # Выпадающий список плагинов
+        self.cmb_plugin = QComboBox()
+        self.cmb_plugin.addItems(["", "tor"])
+
         form_layout.addRow(self.chk_enabled)
         form_layout.addRow("Name:", self.txt_name)
         form_layout.addRow("Host:", self.txt_host)
@@ -407,6 +501,13 @@ class ProxyManagerDialog(QDialog):
         form_layout.addRow("Protocol:", self.cmb_protocol)
         form_layout.addRow("Username:", self.txt_username)
         form_layout.addRow("Password:", self.txt_password)
+        form_layout.addRow("Plugin:", self.cmb_plugin)
+
+        # Кнопка настройки плагина
+        self.btn_configure_plugin = QPushButton("Configure Plugin...")
+        self.btn_configure_plugin.setVisible(False)  # Скрыта по умолчанию
+        self.btn_configure_plugin.clicked.connect(self.open_plugin_ui)
+        form_layout.addRow("", self.btn_configure_plugin)
 
         splitter.addWidget(detail_widget)
         splitter.setStretchFactor(0, 1)
@@ -460,6 +561,33 @@ class ProxyManagerDialog(QDialog):
         self.txt_username.setText(p["username"])
         self.txt_password.setText(p["password"])
 
+        # Установка значения плагина из памяти
+        plugin_name = p.get("plugin", "")
+        idx = self.cmb_plugin.findText(plugin_name)
+        if idx >= 0:
+            self.cmb_plugin.setCurrentIndex(idx)
+        else:
+            self.cmb_plugin.setCurrentIndex(0)  # Пустое значение, если не найдено
+
+        # Показываем кнопку настройки, если плагин выбран
+        self.btn_configure_plugin.setVisible(bool(plugin_name))
+
+    def open_plugin_ui(self):
+        plugin_name = self.cmb_plugin.currentText()
+        if not plugin_name:
+            return
+        plugin = load_plugin(plugin_name)
+        if plugin and hasattr(plugin, "open_settings"):
+            # Сохраняем текущие поля перед открытием настроек плагина
+            if self.current_index != -1 and self.current_index < len(self.proxies):
+                self.save_fields_to_proxy(self.current_index)
+            # Передаем путь к INI файла плагину
+            plugin.open_settings(INI_PATH)
+        else:
+            QMessageBox.warning(
+                self, "Plugin Error", f"Plugin '{plugin_name}' could not be loaded."
+            )
+
     def save_fields_to_proxy(self, index):
         if index == -1 or index >= len(self.proxies):
             return
@@ -471,6 +599,7 @@ class ProxyManagerDialog(QDialog):
         p["protocol"] = self.cmb_protocol.currentText()
         p["username"] = self.txt_username.text()
         p["password"] = self.txt_password.text()
+        p["plugin"] = self.cmb_plugin.currentText()
 
         item = self.list_widget.item(index)
         if item:
@@ -498,6 +627,7 @@ class ProxyManagerDialog(QDialog):
             "protocol": "socks5",
             "username": "",
             "password": "",
+            "plugin": "",
         }
         self.proxies.append(new_proxy)
         self.load_list()
@@ -535,6 +665,14 @@ class TrayApp:
 
         self.init_tray()
         self.rebuild_menu()
+
+        logging.info(f"=== Starting {APP_NAME} v{__version__} ===")
+        self.tray.showMessage(
+            APP_NAME,
+            f"Application started (v{__version__})",
+            QSystemTrayIcon.Information,
+            3000,
+        )
 
         self.update_status()
         self.timer.timeout.connect(self.update_status)
@@ -674,9 +812,15 @@ class TrayApp:
         if dialog.exec_():
             self.config["proxies"] = dialog.get_proxies()
 
-        save_config_settings(self.config)
+        # ВАЖНО: Перезагружаем конфиг с диска, чтобы не затереть изменения,
+        # которые могли внести плагины (например, пути к Tor)
+        reloaded_cfg = load_config()
+        reloaded_cfg["proxies"] = self.config["proxies"]
+        reloaded_cfg["ui_geometry"] = self.config["ui_geometry"]
 
+        save_config_settings(reloaded_cfg)
         self.config = load_config()
+
         self.rebuild_menu()
         self.update_status(manual=True)
 
