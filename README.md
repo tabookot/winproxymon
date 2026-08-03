@@ -4,6 +4,8 @@
 
 WinProxyMon is a lightweight, non-intrusive system tray application for Windows (7/8/10/11) designed to monitor proxy server availability. Built with Python and PyQt5, it provides real-time visual feedback, smart notifications, and a powerful built-in manager for Tor services.
 
+![gui example](img/ui_ss.png)
+
 Whether you are running a simple SOCKS5 proxy or a complex Tor bridge setup, WinProxyMon ensures you always know the exact state of your connection without leaving your desktop or getting interrupted during fullscreen gaming.
 
 > *Authors' collective — GLM, GPT.*

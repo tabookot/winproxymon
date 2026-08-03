@@ -4,6 +4,8 @@
 
 WinProxyMon 是一款适用于 Windows (7/8/10/11) 的轻量级、无干扰系统托盘应用程序，旨在监控代理服务器的可用性。它使用 Python 和 PyQt5 构建，提供实时视觉反馈、智能通知以及强大的内置 Tor 服务管理器。
 
+![gui example](img/ui_ss.png)
+
 无论您是在运行简单的 SOCKS5 代理还是复杂的 Tor 网桥设置，WinProxyMon 都能确保您随时了解连接的确切状态，而无需离开桌面或在全屏游戏时被打扰。
 
 > *作者团队 — GLM, GPT.*
